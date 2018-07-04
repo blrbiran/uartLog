@@ -1,0 +1,6 @@
+temp/
+*.pyc
+*.log
+!.gitignore
+!*.py
+!*.md
