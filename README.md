@@ -1,4 +1,4 @@
-usage: uartLog.py [-h] [-n N]
+usage: uartLog.py [-h] [-n N] [-f]
 
 Uart analysis program.
 
