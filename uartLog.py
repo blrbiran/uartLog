@@ -9,10 +9,6 @@ import sys
 import os
 import re
 import time
-import signal
-
-import inspect
-import ctypes
 
 # Global Settings
 reStr = r""
@@ -87,6 +83,8 @@ def escapeKeyword(keyList):
 def handleSettingCmd(command, serial, fileHandler, filterFileHandler=None):
     global reStr
     global fullLogTime
+    global FLAG_OUTPUT_FILTER_FILE
+
     print("Cmd:" + command)
     if command[0] == 'a':
         # print all log
@@ -126,7 +124,7 @@ def handleCmd(serial, command, fileHandler, filterFileHandler=None):
         serial.write(cmd)
         serial.flushOutput()
     elif command[0] == ':':
-        handleSettingCmd(command[1:], serial, fileHandler, filterFileHandler=None)
+        handleSettingCmd(command[1:], serial, fileHandler, filterFileHandler)
     else:
         tmpReStr = reStr
         reStr = r"^.*()+.*$"
