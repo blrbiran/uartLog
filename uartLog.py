@@ -6,6 +6,7 @@ import argparse
 import threading
 
 import sys
+import os
 import re
 import time
 import signal
@@ -18,8 +19,7 @@ reStr = r""
 port = "COM6"
 baud = 115200 * 8
 FLAG_OUTPUT_FILTER_FILE = False
-fullLogTime = 4
-readThread = None
+fullLogTime = 5
 
 # reference: https://github.com/pyserial/pyserial/issues/216
 class ReadLine:
@@ -44,6 +44,7 @@ class ReadLine:
             else:
                 self.buf.extend(data)
 
+# get regex results
 def getFilter(logStr, reStr):
     reFilter = re.compile(reStr, re.I + re.M + re.U)
     result = reFilter.findall(logStr)
@@ -52,6 +53,7 @@ def getFilter(logStr, reStr):
     else:
         return result
 
+# filter uart data then print to stdout and write to files
 def handleData(line, reStr=r"^.*()+.*$", fileHandler=None, filterFileHandler=None):
     try:
         newLine = line.decode().strip()
@@ -62,29 +64,29 @@ def handleData(line, reStr=r"^.*()+.*$", fileHandler=None, filterFileHandler=Non
             print(newLine)
             if filterFileHandler:
                 filterFileHandler.write(newLine + "\n")
-            # print(line.decode().strip())
     except UnicodeDecodeError as e:
         print(e)
         print(line)
 
+# single thread for read uart data
 def readFromPort(serial, fileHandler=None, filterFileHandler=None):
     global reStr
-    global readThread
 
     serialReadLine = ReadLine(serial)
-    while not readThread.stopped():
+    while True:
         line = serialReadLine.readline()   # read a '\n' terminated line
         # line = serial.readline()
         handleData(line, reStr, fileHandler, filterFileHandler)
 
+# get escaped key words for regex
 def escapeKeyword(keyList):
     escapeKeyList = [ re.escape(key) for key in keyList ]
     return escapeKeyList
 
-def handleSettingCmd(command):
+# handle program control command
+def handleSettingCmd(command, serial, fileHandler, filterFileHandler=None):
     global reStr
     global fullLogTime
-    global readThread
     print("Cmd:" + command)
     if command[0] == 'a':
         # print all log
@@ -94,22 +96,28 @@ def handleSettingCmd(command):
         reStr = r"^.*(" + r"|".join(escapedFilterKeyList) + r")+.*$"
         print("reStr: " + reStr)
     elif command[0] == 't':
-        fullLogTime = int(command[2:].strip())
-        print("Show full log time: %ds" % fullLogTime)
+        try:
+            fullLogTime = int(command[2:].strip())
+            print("Show full log time: %ds" % fullLogTime)
+        except ValueError:
+            fullLogTime = 5
+            print("Show full log time: default 5s")
     elif command[0] == 'q':
         print("Byebye!")
-        # _async_raise(readThread.ident, SystemExit)
-        readThread.stop()
-        readThread.join()
-        exit()
+        if FLAG_OUTPUT_FILTER_FILE:
+            filterFileHandler.close()
+        fileHandler.close()
+        # serial.close()
+        os._exit(0)
 
+# reset reStr variable after timeout seconds
 def setReStrAfter(newReStr=r"^.*()+.*$",timeout=fullLogTime):
     global reStr
     showLogEvent = threading.Event()
     showLogEvent.wait(timeout=fullLogTime)
-    # time.sleep(fullLogTime)
     reStr = newReStr
 
+# handle user command
 def handleCmd(serial, command, fileHandler, filterFileHandler=None):
     global reStr
 
@@ -118,7 +126,7 @@ def handleCmd(serial, command, fileHandler, filterFileHandler=None):
         serial.write(cmd)
         serial.flushOutput()
     elif command[0] == ':':
-        handleSettingCmd(command[1:])
+        handleSettingCmd(command[1:], serial, fileHandler, filterFileHandler=None)
     else:
         tmpReStr = reStr
         reStr = r"^.*()+.*$"
@@ -145,26 +153,11 @@ def sendCtrlC(serial):
     delayedWork = threading.Thread(target=setReStrAfter,args=(tmpReStr, fullLogTime))
     delayedWork.start()
 
-class StoppableThread(threading.Thread):
-    """Thread class with a stop() method. The thread itself has to check
-    regularly for the stopped() condition."""
-    def __init__(self, *args, **kwargs):
-        super(StoppableThread, self).__init__(*args, **kwargs)
-        self._stop_event = threading.Event()
-        self._stop_event.clear()
-
-    def stop(self):
-        self._stop_event.set()
-
-    def stopped(self):
-        return self._stop_event.is_set()
-
 def main(args):
     global reStr
     global port
     global baud
     global FLAG_OUTPUT_FILTER_FILE
-    global readThread
 
     # Setting Here
     port = "COM6"
@@ -205,7 +198,7 @@ def main(args):
         filterf = None
 
     # start reading thread
-    readThread = StoppableThread(target=readFromPort, args=(ser, f, filterf))
+    readThread = threading.Thread(target=readFromPort, args=(ser, f, filterf))
     readThread.start()
 
     # wait for input from command line
@@ -214,6 +207,7 @@ def main(args):
             command = input()
             handleCmd(ser, command, f, filterf)
         except KeyboardInterrupt:
+            # send Ctrl-C to console
             sendCtrlC(ser)
             # continue
 
@@ -222,10 +216,11 @@ def main(args):
     f.close()
     ser.close()
 
+# parser arguments
 def parseArg():
     parser = argparse.ArgumentParser(description='Uart analysis program.')
-    parser.add_argument('-n', nargs=1, help='log name')    #选项参数
-    parser.add_argument('-f', help='export filter file', action="store_true")    #选项参数
+    parser.add_argument('-n', nargs=1, help='log name')
+    parser.add_argument('-f', help='export filter file', action="store_true")
     args = parser.parse_args()
     print(args)
     return args
