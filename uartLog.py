@@ -8,12 +8,18 @@ import threading
 import sys
 import re
 import time
+import signal
+
+import inspect
+import ctypes
 
 # Global Settings
 reStr = r""
 port = "COM6"
 baud = 115200 * 8
 FLAG_OUTPUT_FILTER_FILE = False
+fullLogTime = 4
+readThread = None
 
 # reference: https://github.com/pyserial/pyserial/issues/216
 class ReadLine:
@@ -63,9 +69,10 @@ def handleData(line, reStr=r"^.*()+.*$", fileHandler=None, filterFileHandler=Non
 
 def readFromPort(serial, fileHandler=None, filterFileHandler=None):
     global reStr
+    global readThread
 
     serialReadLine = ReadLine(serial)
-    while True:
+    while not readThread.stopped():
         line = serialReadLine.readline()   # read a '\n' terminated line
         # line = serial.readline()
         handleData(line, reStr, fileHandler, filterFileHandler)
@@ -76,6 +83,8 @@ def escapeKeyword(keyList):
 
 def handleSettingCmd(command):
     global reStr
+    global fullLogTime
+    global readThread
     print("Cmd:" + command)
     if command[0] == 'a':
         # print all log
@@ -84,11 +93,31 @@ def handleSettingCmd(command):
         escapedFilterKeyList = escapeKeyword(command[2:].split("\&"))
         reStr = r"^.*(" + r"|".join(escapedFilterKeyList) + r")+.*$"
         print("reStr: " + reStr)
+    elif command[0] == 't':
+        fullLogTime = int(command[2:].strip())
+        print("Show full log time: %ds" % fullLogTime)
+    elif command[0] == 'q':
+        print("Byebye!")
+        # _async_raise(readThread.ident, SystemExit)
+        readThread.stop()
+        readThread.join()
+        exit()
+
+def setReStrAfter(newReStr=r"^.*()+.*$",timeout=fullLogTime):
+    global reStr
+    showLogEvent = threading.Event()
+    showLogEvent.wait(timeout=fullLogTime)
+    # time.sleep(fullLogTime)
+    reStr = newReStr
 
 def handleCmd(serial, command, fileHandler, filterFileHandler=None):
     global reStr
 
-    if command[0] == ':':
+    if command == "":
+        cmd = "\n".encode("gbk")
+        serial.write(cmd)
+        serial.flushOutput()
+    elif command[0] == ':':
         handleSettingCmd(command[1:])
     else:
         tmpReStr = reStr
@@ -96,20 +125,46 @@ def handleCmd(serial, command, fileHandler, filterFileHandler=None):
         cmd = command + "\n"
         cmd = cmd.encode("gbk")
         # write to file
-        fileHandler.write(cmd + "\n")
+        fileHandler.write(command + "\n")
         if filterFileHandler:
-            filterFileHandler.write(cmd + "\n")
+            filterFileHandler.write(command + "\n")
         # write to serial
         serial.write(cmd)
         serial.flushOutput()
-        time.sleep(5)
-        reStr = tmpReStr
+        delayedWork = threading.Thread(target=setReStrAfter,args=(tmpReStr, fullLogTime))
+        delayedWork.start()
+
+def sendCtrlC(serial):
+    global reStr
+    tmpReStr = reStr
+    reStr = r"^.*()+.*$"
+    # Ctrl-C => 0x03
+    cmd = chr(0x03).encode("gbk")
+    serial.write(cmd)
+    serial.flushOutput()
+    delayedWork = threading.Thread(target=setReStrAfter,args=(tmpReStr, fullLogTime))
+    delayedWork.start()
+
+class StoppableThread(threading.Thread):
+    """Thread class with a stop() method. The thread itself has to check
+    regularly for the stopped() condition."""
+    def __init__(self, *args, **kwargs):
+        super(StoppableThread, self).__init__(*args, **kwargs)
+        self._stop_event = threading.Event()
+        self._stop_event.clear()
+
+    def stop(self):
+        self._stop_event.set()
+
+    def stopped(self):
+        return self._stop_event.is_set()
 
 def main(args):
     global reStr
     global port
     global baud
     global FLAG_OUTPUT_FILTER_FILE
+    global readThread
 
     # Setting Here
     port = "COM6"
@@ -129,7 +184,7 @@ def main(args):
     else:
         filenamePrefix = "out"
 
-    if args.f == None:
+    if args.f == False:
         FLAG_OUTPUT_FILTER_FILE = False
     else:
         FLAG_OUTPUT_FILTER_FILE = True
@@ -150,8 +205,8 @@ def main(args):
         filterf = None
 
     # start reading thread
-    thread = threading.Thread(target=readFromPort, args=(ser, f, filterf))
-    thread.start()
+    readThread = StoppableThread(target=readFromPort, args=(ser, f, filterf))
+    readThread.start()
 
     # wait for input from command line
     while True:
@@ -159,7 +214,8 @@ def main(args):
             command = input()
             handleCmd(ser, command, f, filterf)
         except KeyboardInterrupt:
-            break
+            sendCtrlC(ser)
+            # continue
 
     if FLAG_OUTPUT_FILTER_FILE:
         filterf.close()
@@ -175,6 +231,9 @@ def parseArg():
     return args
 
 if __name__ == '__main__':
+    # ref: https://docs.python.org/2/library/sys.html#sys.setcheckinterval
+    # set thread switches interval
+    sys.setcheckinterval = 20
     args = parseArg()
     main(args)
 
